@@ -1,0 +1,113 @@
+# ──────────────────────────────────────────
+# BLUE Deployment
+# ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: attendance-blue
+  namespace: dev
+  labels:
+    app: attendance
+    slot: blue
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: attendance
+      slot: blue
+  template:
+    metadata:
+      labels:
+        app: attendance
+        slot: blue
+    spec:
+      containers:
+      - name: attendance
+        image: attendance:1.0.0
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8081
+---
+# ──────────────────────────────────────────
+# GREEN Deployment
+# ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: attendance-green
+  namespace: dev
+  labels:
+    app: attendance
+    slot: green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: attendance
+      slot: green
+  template:
+    metadata:
+      labels:
+        app: attendance
+        slot: green
+    spec:
+      containers:
+      - name: attendance
+        image: attendance:1.0.0
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8081
+---
+# ──────────────────────────────────────────
+# Main Service (points to BLUE initially)
+# ──────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: attendance
+  namespace: dev
+spec:
+  selector:
+    app: attendance
+    slot: blue
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8081
+  type: ClusterIP
+---
+# ──────────────────────────────────────────
+# Blue slot Service
+# ──────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: attendance-blue
+  namespace: dev
+spec:
+  selector:
+    app: attendance
+    slot: blue
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8081
+  type: ClusterIP
+---
+# ──────────────────────────────────────────
+# Green slot Service
+# ──────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: attendance-green
+  namespace: dev
+spec:
+  selector:
+    app: attendance
+    slot: green
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8081
+  type: ClusterIP
