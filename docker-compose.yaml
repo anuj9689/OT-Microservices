@@ -70,23 +70,23 @@ services:
     depends_on:
       - empms-db
 
-  empms-salary:
-    build:
-      context: salary/
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.empms-salary.rule=Host(`ot-microservices.opstree.com`) && PathPrefix(`/salary/`)"
-    environment:
+  #empms-salary:
+    #build:
+    #  context: salary/
+    #labels:
+    #  - "traefik.enable=true"
+    #  - "traefik.http.routers.empms-salary.rule=Host(`ot-microservices.opstree.com`) && PathPrefix(`/salary/`)"
+    #environment:
 #      ELASTIC_APM_SERVICE_NAME: "salary"
 #      ELASTIC_APM_SERVER_URL: "http://apm-server:8200"
-      SPRING_ELASTICSEARCH_REST_URIS: "empms-es:9200"
-      SPRING_ELASTICSEARCH_REST_USERNAME: elastic
-      SPRING_ELASTICSEARCH_REST_PASSWORD: elastic
-      ELASTIC_APM_ENABLED: "false"
-    networks:
-      - ot-microservices
-    depends_on:
-      - empms-es
+    #  SPRING_ELASTICSEARCH_REST_URIS: "empms-es:9200"
+    #  SPRING_ELASTICSEARCH_REST_USERNAME: elastic
+     # SPRING_ELASTICSEARCH_REST_PASSWORD: elastic
+    #  ELASTIC_APM_ENABLED: "false"
+    #networks:
+     # - ot-microservices
+    #depends_on:
+    #  - empms-es
 
   empms-employee:
     build:
@@ -128,13 +128,12 @@ services:
       - "--providers.docker.exposedbydefault=false"
     ports:
       - 80:80
-      - 8080:8080
+      - 8090:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - empms-frontend
       - empms-attendance
-      - empms-salary
       - empms-employee
     networks:
       - ot-microservices

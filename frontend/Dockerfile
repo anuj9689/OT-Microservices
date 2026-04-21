@@ -1,20 +1,15 @@
-FROM node:16.15.1
-
-MAINTAINER Opstree Solutions
-
-COPY . /app
+FROM node:14-alpine
 
 WORKDIR /app/
 
-RUN apt-get update -y && \
-    apt-get install git -y
+COPY . /app
 
-RUN npm install 
+RUN npm install
 
 RUN npm run build
 
-RUN yarn global add serve
+RUN npm install -g serve
 
-EXPOSE 3000
+EXPOSE 3001
 
 ENTRYPOINT ["serve", "-s", "build"]
