@@ -1,36 +1,26 @@
 @Library('jenkins-shared-library@main') _
+
 import org.example.DeploymentManager
 
 pipeline {
     agent any
 
-    triggers {
-        GenericTrigger(
-            genericVariables: [
-                [key: 'GIT_REF',     value: '$.ref'],
-                [key: 'GIT_COMMIT',  value: '$.after'],
-                [key: 'SERVICE',     value: '$.repository.name'],
-                [key: 'ENVIRONMENT', value: '$.ref',
-                 regexpFilter: 'refs/heads/(dev|staging|master)',
-                 defaultValue: 'dev']
-            ],
-            token: 'ot-microservices-token',
-            causeString: 'Auto trigger: $GIT_REF',
-
-            // Sirf dev, staging, master branch pe trigger ho
-            regexpFilterText:       '$GIT_REF',
-            regexpFilterExpression: 'refs/heads/(dev|staging|master)'
+    parameters {
+        choice(
+            name: 'SERVICE',
+            choices: ['attendance', 'employee', 'salary', 'frontend', 'notification'],
+            description: 'Which microservice to deploy'
         )
-    }
-
-    environment {
-        // Branch se environment decide hoga automatically
-        ENVIRONMENT = "${
-            env.GIT_REF?.contains('master') ? 'prod' :
-            env.GIT_REF?.contains('staging') ? 'staging' : 'dev'
-        }"
-        SERVICE = 'attendance'   // ya GitHub repo name se aayega
-        VERSION = "${env.GIT_COMMIT?.take(7) ?: '1.0.0'}"
+        string(
+            name: 'VERSION',
+            defaultValue: '1.0.0',
+            description: 'Semver version e.g. 1.0.0'
+        )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'staging', 'prod'],
+            description: 'Target environment'
+        )
     }
 
     stages {
@@ -38,25 +28,30 @@ pipeline {
         stage('Validate') {
             steps {
                 script {
-                    echo "Service    : ${env.SERVICE}"
-                    echo "Version    : ${env.VERSION}"
-                    echo "Environment: ${env.ENVIRONMENT}"
-
-                    new DeploymentManager(this).validateConfig(
-                        env.SERVICE,
-                        env.ENVIRONMENT,
-                        env.VERSION
+                    def manager = new DeploymentManager(this)
+                    manager.validateConfig(
+                        params.SERVICE,
+                        params.ENVIRONMENT,
+                        params.VERSION
                     )
                 }
             }
         }
 
         stage('Deploy to Dev') {
-            when { expression { env.ENVIRONMENT == 'dev' } }
+            when {
+                expression {
+                    return params.ENVIRONMENT == 'dev'
+                }
+            }
             steps {
                 script {
-                    new DeploymentManager(this).deploy(
-                        env.SERVICE, 'dev', env.VERSION)
+                    def manager = new DeploymentManager(this)
+                    manager.deploy(
+                        params.SERVICE,
+                        'dev',
+                        params.VERSION
+                    )
                 }
             }
         }
@@ -64,50 +59,70 @@ pipeline {
         stage('Deploy to Staging') {
             when {
                 anyOf {
-                    expression { env.ENVIRONMENT == 'staging' }
-                    expression { env.ENVIRONMENT == 'prod' }
+                    expression { return params.ENVIRONMENT == 'staging' }
+                    expression { return params.ENVIRONMENT == 'prod' }
                 }
             }
             steps {
                 script {
-                    new DeploymentManager(this).deploy(
-                        env.SERVICE, 'staging', env.VERSION)
+                    def manager = new DeploymentManager(this)
+                    manager.deploy(
+                        params.SERVICE,
+                        'staging',
+                        params.VERSION
+                    )
                 }
             }
         }
 
         stage('Approval for Prod') {
-            when { expression { env.ENVIRONMENT == 'prod' } }
+            when {
+                expression {
+                    return params.ENVIRONMENT == 'prod'
+                }
+            }
             steps {
                 timeout(time: 30, unit: 'MINUTES') {
-                    input message: "Deploy ${env.SERVICE} v${env.VERSION} to PROD?",
-                          ok: 'Yes, Deploy'
+                    input(
+                        message: 'Deploy to PRODUCTION?',
+                        ok: 'Yes, Deploy'
+                    )
                 }
             }
         }
 
         stage('Deploy to Prod') {
-            when { expression { env.ENVIRONMENT == 'prod' } }
+            when {
+                expression {
+                    return params.ENVIRONMENT == 'prod'
+                }
+            }
             steps {
                 script {
-                    new DeploymentManager(this).deploy(
-                        env.SERVICE, 'prod', env.VERSION)
+                    def manager = new DeploymentManager(this)
+                    manager.deploy(
+                        params.SERVICE,
+                        'prod',
+                        params.VERSION
+                    )
                 }
             }
         }
     }
 
     post {
+        success {
+            echo "SUCCESS: ${params.SERVICE} v${params.VERSION} deployed to ${params.ENVIRONMENT}"
+        }
         failure {
             script {
-                echo "Pipeline failed — triggering rollback"
-                new DeploymentManager(this).rollback(
-                    env.SERVICE, env.ENVIRONMENT)
+                echo "FAILED: Triggering rollback for ${params.SERVICE} on ${params.ENVIRONMENT}"
+                def manager = new DeploymentManager(this)
+                manager.rollback(
+                    params.SERVICE,
+                    params.ENVIRONMENT
+                )
             }
-        }
-        success {
-            echo "Done: ${env.SERVICE} v${env.VERSION} on ${env.ENVIRONMENT}"
         }
     }
 }
-
