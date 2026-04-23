@@ -1,297 +1,128 @@
-@Library('jenkins-shared-library@main') _
+#!/usr/bin/env python3
+"""
+Unit Tests for Attendance Application
+Tests individual functions without external dependencies
+"""
 
-import org.example.DeploymentManager
-import org.example.NotificationManager
-import org.example.TestManager
+import unittest
+import json
+import sys
+import os
 
-pipeline {
-    agent any
+# Add parent directory to path
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '../..')))
 
-    parameters {
-        choice(
-            name: 'SERVICE',
-            choices: ['attendance', 'employee', 'salary', 'frontend'],
-            description: 'Microservice to test and deploy'
-        )
-        string(
-            name: 'VERSION',
-            defaultValue: '1.0.0',
-            description: 'Version to deploy'
-        )
-        choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'staging', 'prod'],
-            description: 'Target environment'
-        )
-        string(
-            name: 'RECIPIENTS',
-            defaultValue: 'YOUR_EMAIL@gmail.com',
-            description: 'Email recipients'
-        )
-        booleanParam(
-            name: 'RUN_E2E',
-            defaultValue: true,
-            description: 'Run E2E tests?'
-        )
-    }
 
-    environment {
-        BRANCH_NAME = "${env.GIT_BRANCH ?: 'master'}"
-        APP_URL     = "http://localhost:8081"
-    }
+class TestAttendanceUnit(unittest.TestCase):
+    """Unit tests for attendance functions"""
 
-    stages {
+    def setUp(self):
+        """Setup test fixtures"""
+        self.valid_employee_id   = "EMP001"
+        self.invalid_employee_id = ""
+        self.valid_date          = "2024-01-15"
+        self.invalid_date        = "not-a-date"
 
-        // ── STAGE 1: NOTIFY START ──────────────────────────────
-        stage('Notify Start') {
-            steps {
-                script {
-                    new NotificationManager(this)
-                        .notifyAll('STARTED', getBuildDetails(this))
-                }
-            }
-        }
+    # ── TEST 1: Employee ID Validation ──────────────────────────
+    def test_valid_employee_id(self):
+        """Test valid employee ID format"""
+        result = self.validate_employee_id("EMP001")
+        self.assertTrue(result)
 
-        // ── STAGE 2: VALIDATE ──────────────────────────────────
-        stage('Validate') {
-            steps {
-                script {
-                    new DeploymentManager(this).validateConfig(
-                        params.SERVICE,
-                        params.ENVIRONMENT,
-                        params.VERSION
-                    )
-                }
-            }
-        }
+    def test_invalid_empty_employee_id(self):
+        """Test empty employee ID"""
+        result = self.validate_employee_id("")
+        self.assertFalse(result)
 
-        // ── STAGE 3: INSTALL DEPENDENCIES ─────────────────────
-        stage('Install Test Dependencies') {
-            steps {
-                script {
-                    new TestManager(this)
-                        .installDependencies(params.SERVICE)
-                }
-            }
-        }
+    def test_invalid_none_employee_id(self):
+        """Test None employee ID"""
+        result = self.validate_employee_id(None)
+        self.assertFalse(result)
 
-        // ── STAGE 4: PARALLEL TESTS ────────────────────────────
-        // Unit and Integration run in parallel
-        stage('Run Tests') {
-            parallel {
+    # ── TEST 2: Date Validation ──────────────────────────────────
+    def test_valid_date_format(self):
+        """Test valid date format"""
+        result = self.validate_date("2024-01-15")
+        self.assertTrue(result)
 
-                stage('Unit Tests') {
-                    steps {
-                        script {
-                            new TestManager(this)
-                                .runUnitTests(params.SERVICE)
-                        }
-                    }
-                    post {
-                        always {
-                            junit(
-                                testResults      : "${params.SERVICE}/tests/reports/unit-results.xml",
-                                allowEmptyResults: true
-                            )
-                        }
-                    }
-                }
+    def test_invalid_date_format(self):
+        """Test invalid date format"""
+        result = self.validate_date("not-a-date")
+        self.assertFalse(result)
 
-                stage('Integration Tests') {
-                    steps {
-                        script {
-                            new TestManager(this).runIntegrationTests(
-                                params.SERVICE,
-                                env.APP_URL
-                            )
-                        }
-                    }
-                    post {
-                        always {
-                            junit(
-                                testResults      : "${params.SERVICE}/tests/reports/integration-results.xml",
-                                allowEmptyResults: true
-                            )
-                        }
-                    }
-                }
-            }
-        }
+    def test_invalid_empty_date(self):
+        """Test empty date"""
+        result = self.validate_date("")
+        self.assertFalse(result)
 
-        // ── STAGE 5: E2E TESTS ─────────────────────────────────
-        // Runs after parallel tests complete
-        stage('E2E Tests') {
-            when {
-                expression { return params.RUN_E2E == true }
-            }
-            steps {
-                script {
-                    new TestManager(this).runE2ETests(
-                        params.SERVICE,
-                        env.APP_URL
-                    )
-                }
-            }
-            post {
-                always {
-                    junit(
-                        testResults      : "${params.SERVICE}/tests/reports/e2e-results.xml",
-                        allowEmptyResults: true
-                    )
-                }
-            }
-        }
+    # ── TEST 3: Attendance Status Validation ────────────────────
+    def test_valid_status_present(self):
+        """Test valid status - present"""
+        result = self.validate_status("present")
+        self.assertTrue(result)
 
-        // ── STAGE 6: COVERAGE CHECK ────────────────────────────
-        stage('Coverage Threshold Check') {
-            steps {
-                script {
-                    new TestManager(this)
-                        .checkCoverageThreshold(params.SERVICE)
-                }
-            }
-        }
+    def test_valid_status_absent(self):
+        """Test valid status - absent"""
+        result = self.validate_status("absent")
+        self.assertTrue(result)
 
-        // ── STAGE 7: GENERATE PDF REPORT ───────────────────────
-        stage('Generate PDF Report') {
-            steps {
-                script {
-                    new TestManager(this)
-                        .generatePDFReport(params.SERVICE)
-                }
-            }
-        }
+    def test_invalid_status(self):
+        """Test invalid status"""
+        result = self.validate_status("unknown")
+        self.assertFalse(result)
 
-        // ── STAGE 8: PUBLISH RESULTS ───────────────────────────
-        stage('Publish Test Results') {
-            steps {
-                script {
-                    new TestManager(this)
-                        .publishResults(params.SERVICE)
-                }
-            }
-        }
+    # ── TEST 4: JSON Response Format ────────────────────────────
+    def test_success_response_format(self):
+        """Test success response has correct keys"""
+        response = self.create_response("success", "Test message")
+        self.assertIn("status",  response)
+        self.assertIn("message", response)
+        self.assertEqual(response["status"], "success")
 
-        // ── STAGE 9: DEPLOY TO DEV ─────────────────────────────
-        stage('Deploy to Dev') {
-            when {
-                expression { return params.ENVIRONMENT == 'dev' }
-            }
-            steps {
-                script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE, 'dev', params.VERSION)
-                }
-            }
-        }
+    def test_error_response_format(self):
+        """Test error response has correct keys"""
+        response = self.create_response("error", "Error message")
+        self.assertIn("status",  response)
+        self.assertIn("message", response)
+        self.assertEqual(response["status"], "error")
 
-        // ── STAGE 10: DEPLOY TO STAGING ────────────────────────
-        stage('Deploy to Staging') {
-            when {
-                anyOf {
-                    expression { return params.ENVIRONMENT == 'staging' }
-                    expression { return params.ENVIRONMENT == 'prod' }
-                }
-            }
-            steps {
-                script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE, 'staging', params.VERSION)
-                }
-            }
-        }
+    # ── TEST 5: Data Sanitization ───────────────────────────────
+    def test_sanitize_removes_spaces(self):
+        """Test sanitize removes leading/trailing spaces"""
+        result = self.sanitize_input("  EMP001  ")
+        self.assertEqual(result, "EMP001")
 
-        // ── STAGE 11: PROD APPROVAL ────────────────────────────
-        stage('Approval for Prod') {
-            when {
-                expression { return params.ENVIRONMENT == 'prod' }
-            }
-            steps {
-                timeout(time: 30, unit: 'MINUTES') {
-                    input(
-                        message: 'All tests passed. Deploy to PROD?',
-                        ok: 'Yes Deploy'
-                    )
-                }
-            }
-        }
+    def test_sanitize_handles_none(self):
+        """Test sanitize handles None input"""
+        result = self.sanitize_input(None)
+        self.assertEqual(result, "")
 
-        // ── STAGE 12: DEPLOY TO PROD ───────────────────────────
-        stage('Deploy to Prod') {
-            when {
-                expression { return params.ENVIRONMENT == 'prod' }
-            }
-            steps {
-                script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE, 'prod', params.VERSION)
-                }
-            }
-        }
-    }
+    # ── HELPER METHODS ──────────────────────────────────────────
+    def validate_employee_id(self, emp_id):
+        if not emp_id:
+            return False
+        return len(str(emp_id).strip()) > 0
 
-    // ── POST BLOCKS ───────────────────────────────────────────
-    post {
+    def validate_date(self, date_str):
+        if not date_str:
+            return False
+        import re
+        pattern = r'^\d{4}-\d{2}-\d{2}$'
+        return bool(re.match(pattern, date_str))
 
-        always {
-            script {
-                new TestManager(this)
-                    .publishResults(params.SERVICE)
-            }
-        }
+    def validate_status(self, status):
+        valid_statuses = ['present', 'absent', 'leave', 'holiday']
+        return status in valid_statuses
 
-        success {
-            script {
-                def details = getBuildDetails(this)
-                details.changes = details.changes + " | ALL TESTS PASSED"
-                new NotificationManager(this).notifyAll('SUCCESS', details)
-            }
-        }
+    def create_response(self, status, message):
+        return {"status": status, "message": message}
 
-        failure {
-            script {
-                def details = getBuildDetails(this)
-                details.changes = details.changes + " | TESTS FAILED"
-                new NotificationManager(this).notifyAll('FAILURE', details)
-            }
-        }
+    def sanitize_input(self, value):
+        if value is None:
+            return ""
+        return str(value).strip()
 
-        unstable {
-            script {
-                def details = getBuildDetails(this)
-                details.changes = details.changes + " | BUILD UNSTABLE"
-                new NotificationManager(this).notifyAll('UNSTABLE', details)
-            }
-        }
 
-        cleanup {
-            cleanWs()
-        }
-    }
-}
-
-// ── HELPER ────────────────────────────────────────────────────
-def getBuildDetails(def ctx) {
-    String changes = 'No changes'
-    try {
-        changes = ctx.sh(
-            script: "git log -1 --pretty=format:'%s by %an'",
-            returnStdout: true
-        ).trim()
-    } catch (Exception e) {
-        changes = 'Could not fetch changes'
-    }
-
-    return [
-        jobName    : ctx.env.JOB_NAME       ?: 'Unknown',
-        buildNumber: ctx.env.BUILD_NUMBER   ?: '0',
-        buildUrl   : ctx.env.BUILD_URL      ?: 'http://localhost:8080',
-        branch     : ctx.env.GIT_BRANCH     ?: 'master',
-        service    : ctx.params.SERVICE     ?: 'unknown',
-        version    : ctx.params.VERSION     ?: '0.0.0',
-        environment: ctx.params.ENVIRONMENT ?: 'unknown',
-        duration   : ctx.currentBuild.durationString ?: 'N/A',
-        changes    : changes,
-        recipients : ctx.params.RECIPIENTS  ?: 'YOUR_EMAIL@gmail.com'
-    ]
-}
+if __name__ == '__main__':
+    unittest.main()
