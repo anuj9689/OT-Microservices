@@ -1,6 +1,7 @@
 pytest
 pytest-cov
 pytest-html
+data-to-xml
 pytest-item-dict
 pytest-xml==0.1.1
 requests
