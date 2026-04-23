@@ -2,6 +2,7 @@
 
 import org.example.DeploymentManager
 import org.example.NotificationManager
+import org.example.TestManager
 
 pipeline {
     agent any
@@ -9,13 +10,13 @@ pipeline {
     parameters {
         choice(
             name: 'SERVICE',
-            choices: ['attendance', 'employee', 'salary', 'frontend', 'notification'],
-            description: 'Which microservice to deploy'
+            choices: ['attendance', 'employee', 'salary', 'frontend'],
+            description: 'Microservice to test and deploy'
         )
         string(
             name: 'VERSION',
             defaultValue: '1.0.0',
-            description: 'Semver version e.g. 1.0.0'
+            description: 'Version to deploy'
         )
         choice(
             name: 'ENVIRONMENT',
@@ -25,15 +26,18 @@ pipeline {
         string(
             name: 'RECIPIENTS',
             defaultValue: 'YOUR_EMAIL@gmail.com',
-            description: 'Email recipients comma separated'
+            description: 'Email recipients'
+        )
+        booleanParam(
+            name: 'RUN_E2E',
+            defaultValue: true,
+            description: 'Run E2E tests?'
         )
     }
 
     environment {
-        JOB_NAME     = "${env.JOB_NAME}"
-        BUILD_NUMBER = "${env.BUILD_NUMBER}"
-        BUILD_URL    = "${env.BUILD_URL}"
-        BRANCH_NAME  = "${env.GIT_BRANCH ?: 'master'}"
+        BRANCH_NAME = "${env.GIT_BRANCH ?: 'master'}"
+        APP_URL     = "http://localhost:8081"
     }
 
     stages {
@@ -42,10 +46,8 @@ pipeline {
         stage('Notify Start') {
             steps {
                 script {
-                    def notifier = new NotificationManager(this)
-                    def details  = getBuildDetails(this)
-
-                    notifier.notifyAll('STARTED', details)
+                    new NotificationManager(this)
+                        .notifyAll('STARTED', getBuildDetails(this))
                 }
             }
         }
@@ -54,8 +56,7 @@ pipeline {
         stage('Validate') {
             steps {
                 script {
-                    def manager = new DeploymentManager(this)
-                    manager.validateConfig(
+                    new DeploymentManager(this).validateConfig(
                         params.SERVICE,
                         params.ENVIRONMENT,
                         params.VERSION
@@ -64,7 +65,114 @@ pipeline {
             }
         }
 
-        // ── STAGE 3: DEPLOY TO DEV ─────────────────────────────
+        // ── STAGE 3: INSTALL DEPENDENCIES ─────────────────────
+        stage('Install Test Dependencies') {
+            steps {
+                script {
+                    new TestManager(this)
+                        .installDependencies(params.SERVICE)
+                }
+            }
+        }
+
+        // ── STAGE 4: PARALLEL TESTS ────────────────────────────
+        // Unit and Integration run in parallel
+        stage('Run Tests') {
+            parallel {
+
+                stage('Unit Tests') {
+                    steps {
+                        script {
+                            new TestManager(this)
+                                .runUnitTests(params.SERVICE)
+                        }
+                    }
+                    post {
+                        always {
+                            junit(
+                                testResults      : "${params.SERVICE}/tests/reports/unit-results.xml",
+                                allowEmptyResults: true
+                            )
+                        }
+                    }
+                }
+
+                stage('Integration Tests') {
+                    steps {
+                        script {
+                            new TestManager(this).runIntegrationTests(
+                                params.SERVICE,
+                                env.APP_URL
+                            )
+                        }
+                    }
+                    post {
+                        always {
+                            junit(
+                                testResults      : "${params.SERVICE}/tests/reports/integration-results.xml",
+                                allowEmptyResults: true
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── STAGE 5: E2E TESTS ─────────────────────────────────
+        // Runs after parallel tests complete
+        stage('E2E Tests') {
+            when {
+                expression { return params.RUN_E2E == true }
+            }
+            steps {
+                script {
+                    new TestManager(this).runE2ETests(
+                        params.SERVICE,
+                        env.APP_URL
+                    )
+                }
+            }
+            post {
+                always {
+                    junit(
+                        testResults      : "${params.SERVICE}/tests/reports/e2e-results.xml",
+                        allowEmptyResults: true
+                    )
+                }
+            }
+        }
+
+        // ── STAGE 6: COVERAGE CHECK ────────────────────────────
+        stage('Coverage Threshold Check') {
+            steps {
+                script {
+                    new TestManager(this)
+                        .checkCoverageThreshold(params.SERVICE)
+                }
+            }
+        }
+
+        // ── STAGE 7: GENERATE PDF REPORT ───────────────────────
+        stage('Generate PDF Report') {
+            steps {
+                script {
+                    new TestManager(this)
+                        .generatePDFReport(params.SERVICE)
+                }
+            }
+        }
+
+        // ── STAGE 8: PUBLISH RESULTS ───────────────────────────
+        stage('Publish Test Results') {
+            steps {
+                script {
+                    new TestManager(this)
+                        .publishResults(params.SERVICE)
+                }
+            }
+        }
+
+        // ── STAGE 9: DEPLOY TO DEV ─────────────────────────────
         stage('Deploy to Dev') {
             when {
                 expression { return params.ENVIRONMENT == 'dev' }
@@ -72,15 +180,12 @@ pipeline {
             steps {
                 script {
                     new DeploymentManager(this).deploy(
-                        params.SERVICE,
-                        'dev',
-                        params.VERSION
-                    )
+                        params.SERVICE, 'dev', params.VERSION)
                 }
             }
         }
 
-        // ── STAGE 4: DEPLOY TO STAGING ─────────────────────────
+        // ── STAGE 10: DEPLOY TO STAGING ────────────────────────
         stage('Deploy to Staging') {
             when {
                 anyOf {
@@ -91,40 +196,27 @@ pipeline {
             steps {
                 script {
                     new DeploymentManager(this).deploy(
-                        params.SERVICE,
-                        'staging',
-                        params.VERSION
-                    )
+                        params.SERVICE, 'staging', params.VERSION)
                 }
             }
         }
 
-        // ── STAGE 5: APPROVAL FOR PROD ─────────────────────────
+        // ── STAGE 11: PROD APPROVAL ────────────────────────────
         stage('Approval for Prod') {
             when {
                 expression { return params.ENVIRONMENT == 'prod' }
             }
             steps {
-                script {
-                    // Approval se pehle notify karo
-                    def notifier = new NotificationManager(this)
-                    def details  = getBuildDetails(this)
-                    details.changes = "Waiting for PROD approval"
-
-                    notifier.sendSlack('UNSTABLE', details)
-                    notifier.sendEmail('UNSTABLE', details)
-                }
-
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
-                        message: 'Deploy to PRODUCTION?',
-                        ok: 'Yes, Deploy'
+                        message: 'All tests passed. Deploy to PROD?',
+                        ok: 'Yes Deploy'
                     )
                 }
             }
         }
 
-        // ── STAGE 6: DEPLOY TO PROD ────────────────────────────
+        // ── STAGE 12: DEPLOY TO PROD ───────────────────────────
         stage('Deploy to Prod') {
             when {
                 expression { return params.ENVIRONMENT == 'prod' }
@@ -132,10 +224,7 @@ pipeline {
             steps {
                 script {
                     new DeploymentManager(this).deploy(
-                        params.SERVICE,
-                        'prod',
-                        params.VERSION
-                    )
+                        params.SERVICE, 'prod', params.VERSION)
                 }
             }
         }
@@ -144,75 +233,45 @@ pipeline {
     // ── POST BLOCKS ───────────────────────────────────────────
     post {
 
-        // Hamesha chalega — success ho ya failure
         always {
             script {
-                echo "Pipeline finished — sending final notification"
+                new TestManager(this)
+                    .publishResults(params.SERVICE)
             }
         }
 
-        // Sirf success pe
         success {
             script {
-                def notifier = new NotificationManager(this)
-                def details  = getBuildDetails(this)
-
-                // Master/main branch pe extra notification
-                if (env.BRANCH_NAME == 'master' ||
-                    env.BRANCH_NAME == 'main') {
-                    details.changes = details.changes +
-                        " | MASTER BRANCH DEPLOY"
-                }
-
-                notifier.notifyAll('SUCCESS', details)
+                def details = getBuildDetails(this)
+                details.changes = details.changes + " | ALL TESTS PASSED"
+                new NotificationManager(this).notifyAll('SUCCESS', details)
             }
         }
 
-        // Sirf failure pe
         failure {
             script {
-                def notifier = new NotificationManager(this)
-                def details  = getBuildDetails(this)
-
-                // Rollback trigger karo
-                try {
-                    new DeploymentManager(this).rollback(
-                        params.SERVICE,
-                        params.ENVIRONMENT
-                    )
-                    details.changes = details.changes +
-                        " | AUTO-ROLLBACK TRIGGERED"
-                } catch (Exception e) {
-                    details.changes = details.changes +
-                        " | ROLLBACK FAILED: ${e.message}"
-                }
-
-                notifier.notifyAll('FAILURE', details)
+                def details = getBuildDetails(this)
+                details.changes = details.changes + " | TESTS FAILED"
+                new NotificationManager(this).notifyAll('FAILURE', details)
             }
         }
 
-        // Unstable build pe (test failures)
         unstable {
             script {
-                def notifier = new NotificationManager(this)
-                def details  = getBuildDetails(this)
-                details.changes = details.changes +
-                    " | BUILD UNSTABLE - CHECK TESTS"
-
-                notifier.notifyAll('UNSTABLE', details)
+                def details = getBuildDetails(this)
+                details.changes = details.changes + " | BUILD UNSTABLE"
+                new NotificationManager(this).notifyAll('UNSTABLE', details)
             }
         }
 
-        // Cleanup
         cleanup {
             cleanWs()
         }
     }
 }
 
-// ── HELPER FUNCTION — BUILD DETAILS ───────────────────────────
+// ── HELPER ────────────────────────────────────────────────────
 def getBuildDetails(def ctx) {
-    // Git changes lo
     String changes = 'No changes'
     try {
         changes = ctx.sh(
@@ -224,15 +283,15 @@ def getBuildDetails(def ctx) {
     }
 
     return [
-        jobName    : ctx.env.JOB_NAME      ?: 'Unknown Job',
-        buildNumber: ctx.env.BUILD_NUMBER  ?: '0',
-        buildUrl   : ctx.env.BUILD_URL     ?: 'http://localhost:8080',
-        branch     : ctx.env.GIT_BRANCH    ?: 'master',
-        service    : ctx.params.SERVICE    ?: 'unknown',
-        version    : ctx.params.VERSION    ?: '0.0.0',
+        jobName    : ctx.env.JOB_NAME       ?: 'Unknown',
+        buildNumber: ctx.env.BUILD_NUMBER   ?: '0',
+        buildUrl   : ctx.env.BUILD_URL      ?: 'http://localhost:8080',
+        branch     : ctx.env.GIT_BRANCH     ?: 'master',
+        service    : ctx.params.SERVICE     ?: 'unknown',
+        version    : ctx.params.VERSION     ?: '0.0.0',
         environment: ctx.params.ENVIRONMENT ?: 'unknown',
         duration   : ctx.currentBuild.durationString ?: 'N/A',
         changes    : changes,
-        recipients : ctx.params.RECIPIENTS ?: 'YOUR_EMAIL@gmail.com'
+        recipients : ctx.params.RECIPIENTS  ?: 'YOUR_EMAIL@gmail.com'
     ]
 }

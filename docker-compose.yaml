@@ -115,7 +115,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.empms-frontend.rule=Host(`ot-microservices.opstree.com`) && PathPrefix(`/`)"
-      - "traefik.http.services.empms-frontend.loadbalancer.server.port=3000"
+      - "traefik.http.services.empms-frontend.loadbalancer.server.port=3001"
     networks:
       - ot-microservices
 
