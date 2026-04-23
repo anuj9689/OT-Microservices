@@ -1,0 +1,8 @@
+pytest==7.4.0
+pytest-cov==4.1.0
+pytest-html==4.0.0
+pytest-xml==0.3.0
+requests==2.31.0
+coverage==7.3.0
+junit-xml==1.9
+fpdf2==2.7.6
