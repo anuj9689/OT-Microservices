@@ -76,7 +76,6 @@ pipeline {
         }
 
         // ── STAGE 4: PARALLEL TESTS ────────────────────────────
-        // Unit and Integration run in parallel
         stage('Run Tests') {
             parallel {
 
@@ -119,7 +118,6 @@ pipeline {
         }
 
         // ── STAGE 5: E2E TESTS ─────────────────────────────────
-        // Runs after parallel tests complete
         stage('E2E Tests') {
             when {
                 expression { return params.RUN_E2E == true }
@@ -207,6 +205,14 @@ pipeline {
                 expression { return params.ENVIRONMENT == 'prod' }
             }
             steps {
+                script {
+                    // CHANGE: Approval se pehle notify karo
+                    def details = getBuildDetails(this)
+                    details.changes = details.changes +
+                        " | WAITING FOR PROD APPROVAL"
+                    new NotificationManager(this)
+                        .notifyAll('UNSTABLE', details)
+                }
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
                         message: 'All tests passed. Deploy to PROD?',
@@ -233,6 +239,7 @@ pipeline {
     // ── POST BLOCKS ───────────────────────────────────────────
     post {
 
+        // Hamesha chalega
         always {
             script {
                 new TestManager(this)
@@ -240,37 +247,65 @@ pipeline {
             }
         }
 
+        // CHANGE: Success pe branch check add kiya
         success {
             script {
                 def details = getBuildDetails(this)
-                details.changes = details.changes + " | ALL TESTS PASSED"
+
+                // Master branch pe extra message
+                if (env.BRANCH_NAME?.contains('master') ||
+                    env.BRANCH_NAME?.contains('main')) {
+                    details.changes = details.changes +
+                        " | MASTER BRANCH DEPLOY SUCCESSFUL"
+                } else {
+                    details.changes = details.changes +
+                        " | ALL TESTS PASSED"
+                }
+
                 new NotificationManager(this).notifyAll('SUCCESS', details)
             }
         }
 
+        // CHANGE: Failure pe rollback attempt add kiya
         failure {
             script {
                 def details = getBuildDetails(this)
-                details.changes = details.changes + " | TESTS FAILED"
+
+                // Rollback try karo
+                try {
+                    new DeploymentManager(this).rollback(
+                        params.SERVICE,
+                        params.ENVIRONMENT
+                    )
+                    details.changes = details.changes +
+                        " | TESTS FAILED — AUTO ROLLBACK DONE"
+                } catch (Exception e) {
+                    details.changes = details.changes +
+                        " | TESTS FAILED — ROLLBACK ALSO FAILED: ${e.message}"
+                }
+
                 new NotificationManager(this).notifyAll('FAILURE', details)
             }
         }
 
+        // Unstable pe notify
         unstable {
             script {
                 def details = getBuildDetails(this)
-                details.changes = details.changes + " | BUILD UNSTABLE"
+                details.changes = details.changes +
+                    " | BUILD UNSTABLE — CHECK TEST RESULTS"
                 new NotificationManager(this).notifyAll('UNSTABLE', details)
             }
         }
 
+        // Cleanup
         cleanup {
             cleanWs()
         }
     }
 }
 
-// ── HELPER ────────────────────────────────────────────────────
+// ── HELPER — CHANGE: artifactsUrl, testsUrl, coverageUrl add kiye ──
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
     try {
@@ -282,16 +317,26 @@ def getBuildDetails(def ctx) {
         changes = 'Could not fetch changes'
     }
 
+    // Build URL base
+    String buildUrl = ctx.env.BUILD_URL ?: 'http://localhost:8080'
+    String service  = ctx.params.SERVICE ?: 'attendance'
+
     return [
-        jobName    : ctx.env.JOB_NAME       ?: 'Unknown',
-        buildNumber: ctx.env.BUILD_NUMBER   ?: '0',
-        buildUrl   : ctx.env.BUILD_URL      ?: 'http://localhost:8080',
-        branch     : ctx.env.GIT_BRANCH     ?: 'master',
-        service    : ctx.params.SERVICE     ?: 'unknown',
-        version    : ctx.params.VERSION     ?: '0.0.0',
-        environment: ctx.params.ENVIRONMENT ?: 'unknown',
-        duration   : ctx.currentBuild.durationString ?: 'N/A',
-        changes    : changes,
-        recipients : ctx.params.RECIPIENTS  ?: 'YOUR_EMAIL@gmail.com'
+        jobName     : ctx.env.JOB_NAME       ?: 'Unknown',
+        buildNumber : ctx.env.BUILD_NUMBER   ?: '0',
+        buildUrl    : buildUrl,
+
+        // CHANGE: Ye teen links add kiye — NotificationManager use karega
+        artifactsUrl: "${buildUrl}artifact/${service}/tests/reports/test-report.pdf",
+        testsUrl    : "${buildUrl}testReport/",
+        coverageUrl : "${buildUrl}Coverage_20Report/",
+
+        branch      : ctx.env.GIT_BRANCH     ?: 'master',
+        service     : service,
+        version     : ctx.params.VERSION     ?: '0.0.0',
+        environment : ctx.params.ENVIRONMENT ?: 'unknown',
+        duration    : ctx.currentBuild.durationString ?: 'N/A',
+        changes     : changes,
+        recipients  : ctx.params.RECIPIENTS  ?: 'YOUR_EMAIL@gmail.com'
     ]
 }
