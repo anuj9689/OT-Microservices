@@ -9,4 +9,4 @@ flask
 mysql-connector-python
 gunicorn
 pyyaml
-elasticapm
+elastic-apm
