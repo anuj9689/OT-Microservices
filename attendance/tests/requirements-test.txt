@@ -1,15 +1,12 @@
 pytest
 pytest-cov
 pytest-html
-data-to-xml
-pytest-item-dict
 pytest-xml==0.1.1
 requests
 coverage
-junit-xml
 fpdf2
-flask                ← ADD THIS
-mysql-connector-python  ← ADD THIS
-gunicorn             ← ADD THIS
-pyyaml               ← ADD THIS
-elasticapm 
+flask
+mysql-connector-python
+gunicorn
+pyyaml
+elasticapm
