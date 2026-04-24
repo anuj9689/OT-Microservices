@@ -3,6 +3,7 @@
 import org.example.DeploymentManager
 import org.example.NotificationManager
 import org.example.TestManager
+import org.example.SonarQubeManager        // ← NEW: SonarQube import
 
 pipeline {
     agent any
@@ -32,6 +33,27 @@ pipeline {
             name: 'RUN_E2E',
             defaultValue: true,
             description: 'Run E2E tests?'
+        )
+        // ── NEW: SonarQube Parameters ─────────────────────────
+        booleanParam(
+            name: 'RUN_SONAR',
+            defaultValue: true,
+            description: 'Run SonarQube analysis?'
+        )
+        string(
+            name: 'PR_NUMBER',
+            defaultValue: '',
+            description: 'PR number (empty for branch build)'
+        )
+        string(
+            name: 'PR_BRANCH',
+            defaultValue: '',
+            description: 'PR source branch'
+        )
+        string(
+            name: 'TARGET_BRANCH',
+            defaultValue: 'master',
+            description: 'PR target branch'
         )
     }
 
@@ -170,7 +192,64 @@ pipeline {
             }
         }
 
-        // ── STAGE 9: DEPLOY TO DEV ─────────────────────────────
+        // ── STAGE 9: SONARQUBE ANALYSIS ── NEW ─────────────────
+        stage('SonarQube Analysis') {
+            when {
+                expression { return params.RUN_SONAR == true }
+            }
+            steps {
+                script {
+                    def sonar = new SonarQubeManager(this)
+
+                    // PR build hai ya branch build check karo
+                    if (params.PR_NUMBER?.trim()) {
+
+                        // PR Analysis with decoration
+                        sonar.runPRAnalysis(
+                            params.SERVICE,
+                            params.VERSION,
+                            [
+                                prNumber    : params.PR_NUMBER,
+                                prBranch    : params.PR_BRANCH,
+                                targetBranch: params.TARGET_BRANCH,
+                                repo        : 'anuj9689/OT-Microservices'
+                            ]
+                        )
+
+                    } else {
+
+                        // Normal branch analysis
+                        sonar.runBranchAnalysis(
+                            params.SERVICE,
+                            params.VERSION,
+                            env.BRANCH_NAME
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── STAGE 10: QUALITY GATE ── NEW ──────────────────────
+        stage('Quality Gate') {
+            when {
+                expression { return params.RUN_SONAR == true }
+            }
+            steps {
+                script {
+                    def sonar = new SonarQubeManager(this)
+
+                    // Wait for Quality Gate
+                    // Pipeline FAIL hogi agar QG fail hua
+                    sonar.waitForQualityGate()
+
+                    // Metrics fetch karo aur log karo
+                    def results = sonar.getAnalysisResults('OT-Microservices')
+                    echo "SonarQube Metrics: ${results.metrics}"
+                }
+            }
+        }
+
+        // ── STAGE 11: DEPLOY TO DEV ────────────────────────────
         stage('Deploy to Dev') {
             when {
                 expression { return params.ENVIRONMENT == 'dev' }
@@ -183,7 +262,7 @@ pipeline {
             }
         }
 
-        // ── STAGE 10: DEPLOY TO STAGING ────────────────────────
+        // ── STAGE 12: DEPLOY TO STAGING ────────────────────────
         stage('Deploy to Staging') {
             when {
                 anyOf {
@@ -199,14 +278,13 @@ pipeline {
             }
         }
 
-        // ── STAGE 11: PROD APPROVAL ────────────────────────────
+        // ── STAGE 13: PROD APPROVAL ────────────────────────────
         stage('Approval for Prod') {
             when {
                 expression { return params.ENVIRONMENT == 'prod' }
             }
             steps {
                 script {
-                    // CHANGE: Approval se pehle notify karo
                     def details = getBuildDetails(this)
                     details.changes = details.changes +
                         " | WAITING FOR PROD APPROVAL"
@@ -215,14 +293,14 @@ pipeline {
                 }
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
-                        message: 'All tests passed. Deploy to PROD?',
+                        message: 'All tests passed. Quality Gate passed. Deploy to PROD?',
                         ok: 'Yes Deploy'
                     )
                 }
             }
         }
 
-        // ── STAGE 12: DEPLOY TO PROD ───────────────────────────
+        // ── STAGE 14: DEPLOY TO PROD ───────────────────────────
         stage('Deploy to Prod') {
             when {
                 expression { return params.ENVIRONMENT == 'prod' }
@@ -239,7 +317,6 @@ pipeline {
     // ── POST BLOCKS ───────────────────────────────────────────
     post {
 
-        // Hamesha chalega
         always {
             script {
                 new TestManager(this)
@@ -247,65 +324,59 @@ pipeline {
             }
         }
 
-        // CHANGE: Success pe branch check add kiya
         success {
             script {
                 def details = getBuildDetails(this)
 
-                // Master branch pe extra message
                 if (env.BRANCH_NAME?.contains('master') ||
                     env.BRANCH_NAME?.contains('main')) {
                     details.changes = details.changes +
-                        " | MASTER BRANCH DEPLOY SUCCESSFUL"
+                        " | MASTER DEPLOY — QG PASSED"
                 } else {
                     details.changes = details.changes +
-                        " | ALL TESTS PASSED"
+                        " | ALL TESTS PASSED — QG PASSED"
                 }
 
                 new NotificationManager(this).notifyAll('SUCCESS', details)
             }
         }
 
-        // CHANGE: Failure pe rollback attempt add kiya
         failure {
             script {
                 def details = getBuildDetails(this)
 
-                // Rollback try karo
                 try {
                     new DeploymentManager(this).rollback(
                         params.SERVICE,
                         params.ENVIRONMENT
                     )
                     details.changes = details.changes +
-                        " | TESTS FAILED — AUTO ROLLBACK DONE"
+                        " | FAILED — AUTO ROLLBACK DONE"
                 } catch (Exception e) {
                     details.changes = details.changes +
-                        " | TESTS FAILED — ROLLBACK ALSO FAILED: ${e.message}"
+                        " | FAILED — ROLLBACK ALSO FAILED: ${e.message}"
                 }
 
                 new NotificationManager(this).notifyAll('FAILURE', details)
             }
         }
 
-        // Unstable pe notify
         unstable {
             script {
                 def details = getBuildDetails(this)
                 details.changes = details.changes +
-                    " | BUILD UNSTABLE — CHECK TEST RESULTS"
+                    " | UNSTABLE — CHECK SONAR/TESTS"
                 new NotificationManager(this).notifyAll('UNSTABLE', details)
             }
         }
 
-        // Cleanup
         cleanup {
             cleanWs()
         }
     }
 }
 
-// ── HELPER — CHANGE: artifactsUrl, testsUrl, coverageUrl add kiye ──
+// ── HELPER ────────────────────────────────────────────────────
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
     try {
@@ -317,7 +388,6 @@ def getBuildDetails(def ctx) {
         changes = 'Could not fetch changes'
     }
 
-    // Build URL base
     String buildUrl = ctx.env.BUILD_URL ?: 'http://localhost:8080'
     String service  = ctx.params.SERVICE ?: 'attendance'
 
@@ -325,12 +395,10 @@ def getBuildDetails(def ctx) {
         jobName     : ctx.env.JOB_NAME       ?: 'Unknown',
         buildNumber : ctx.env.BUILD_NUMBER   ?: '0',
         buildUrl    : buildUrl,
-
-        // CHANGE: Ye teen links add kiye — NotificationManager use karega
         artifactsUrl: "${buildUrl}artifact/${service}/tests/reports/test-report.pdf",
         testsUrl    : "${buildUrl}testReport/",
         coverageUrl : "${buildUrl}Coverage_20Report/",
-
+        sonarUrl    : "http://localhost:9000/dashboard?id=OT-Microservices", // ← NEW
         branch      : ctx.env.GIT_BRANCH     ?: 'master',
         service     : service,
         version     : ctx.params.VERSION     ?: '0.0.0',
