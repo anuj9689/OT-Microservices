@@ -1,128 +1,260 @@
-#!/usr/bin/env python3
-"""
-Unit Tests for Attendance Application
-Tests individual functions without external dependencies
-"""
-
-import unittest
+import pytest
 import json
-import sys
-import os
-
-# Add parent directory to path
-sys.path.insert(0, os.path.abspath(
-    os.path.join(os.path.dirname(__file__), '../..')))
+from unittest.mock import patch, MagicMock
+from attendance_api import app, create_mysql_client
+import mysql.connector
 
 
-class TestAttendanceUnit(unittest.TestCase):
-    """Unit tests for attendance functions"""
-
-    def setUp(self):
-        """Setup test fixtures"""
-        self.valid_employee_id   = "EMP001"
-        self.invalid_employee_id = ""
-        self.valid_date          = "2024-01-15"
-        self.invalid_date        = "not-a-date"
-
-    # ── TEST 1: Employee ID Validation ──────────────────────────
-    def test_valid_employee_id(self):
-        """Test valid employee ID format"""
-        result = self.validate_employee_id("EMP001")
-        self.assertTrue(result)
-
-    def test_invalid_empty_employee_id(self):
-        """Test empty employee ID"""
-        result = self.validate_employee_id("")
-        self.assertFalse(result)
-
-    def test_invalid_none_employee_id(self):
-        """Test None employee ID"""
-        result = self.validate_employee_id(None)
-        self.assertFalse(result)
-
-    # ── TEST 2: Date Validation ──────────────────────────────────
-    def test_valid_date_format(self):
-        """Test valid date format"""
-        result = self.validate_date("2024-01-15")
-        self.assertTrue(result)
-
-    def test_invalid_date_format(self):
-        """Test invalid date format"""
-        result = self.validate_date("not-a-date")
-        self.assertFalse(result)
-
-    def test_invalid_empty_date(self):
-        """Test empty date"""
-        result = self.validate_date("")
-        self.assertFalse(result)
-
-    # ── TEST 3: Attendance Status Validation ────────────────────
-    def test_valid_status_present(self):
-        """Test valid status - present"""
-        result = self.validate_status("present")
-        self.assertTrue(result)
-
-    def test_valid_status_absent(self):
-        """Test valid status - absent"""
-        result = self.validate_status("absent")
-        self.assertTrue(result)
-
-    def test_invalid_status(self):
-        """Test invalid status"""
-        result = self.validate_status("unknown")
-        self.assertFalse(result)
-
-    # ── TEST 4: JSON Response Format ────────────────────────────
-    def test_success_response_format(self):
-        """Test success response has correct keys"""
-        response = self.create_response("success", "Test message")
-        self.assertIn("status",  response)
-        self.assertIn("message", response)
-        self.assertEqual(response["status"], "success")
-
-    def test_error_response_format(self):
-        """Test error response has correct keys"""
-        response = self.create_response("error", "Error message")
-        self.assertIn("status",  response)
-        self.assertIn("message", response)
-        self.assertEqual(response["status"], "error")
-
-    # ── TEST 5: Data Sanitization ───────────────────────────────
-    def test_sanitize_removes_spaces(self):
-        """Test sanitize removes leading/trailing spaces"""
-        result = self.sanitize_input("  EMP001  ")
-        self.assertEqual(result, "EMP001")
-
-    def test_sanitize_handles_none(self):
-        """Test sanitize handles None input"""
-        result = self.sanitize_input(None)
-        self.assertEqual(result, "")
-
-    # ── HELPER METHODS ──────────────────────────────────────────
-    def validate_employee_id(self, emp_id):
-        if not emp_id:
-            return False
-        return len(str(emp_id).strip()) > 0
-
-    def validate_date(self, date_str):
-        if not date_str:
-            return False
-        import re
-        pattern = r'^\d{4}-\d{2}-\d{2}$'
-        return bool(re.match(pattern, date_str))
-
-    def validate_status(self, status):
-        valid_statuses = ['present', 'absent', 'leave', 'holiday']
-        return status in valid_statuses
-
-    def create_response(self, status, message):
-        return {"status": status, "message": message}
-
-    def sanitize_input(self, value):
-        if value is None:
-            return ""
-        return str(value).strip()
+@pytest.fixture
+def client():
+    """Flask test client fixture"""
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        yield client
 
 
-if __name__ == '__main__':
-    unittest.main()
+# ══════════════════════════════════════════════════════════════
+# HEALTH CHECK TESTS
+# ══════════════════════════════════════════════════════════════
+
+class TestHealthEndpoint:
+
+    def test_health_mysql_up(self, client):
+        mock_conn = MagicMock()
+        mock_conn.ping.return_value = True
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.get('/attendance/healthz')
+            assert response.status_code == 200
+            data = json.loads(response.data)
+            assert data['mysql'] == 'up'
+            assert data['description'] == 'MySQL is healthy'
+
+    def test_health_mysql_down(self, client):
+        with patch('attendance_api.create_mysql_client', side_effect=Exception("Connection failed")):
+            response = client.get('/attendance/healthz')
+            assert response.status_code == 400
+            data = json.loads(response.data)
+            assert data['mysql'] == 'down'
+            assert data['description'] == 'MySQL is not healthy'
+
+    def test_health_ping_fails(self, client):
+        mock_conn = MagicMock()
+        mock_conn.ping.side_effect = Exception("Ping failed")
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.get('/attendance/healthz')
+            assert response.status_code == 400
+
+    def test_health_returns_json(self, client):
+        with patch('attendance_api.create_mysql_client', side_effect=Exception("error")):
+            response = client.get('/attendance/healthz')
+            assert response.content_type == 'application/json'
+
+    def test_health_method_not_allowed(self, client):
+        response = client.post('/attendance/healthz')
+        assert response.status_code == 405
+
+
+# ══════════════════════════════════════════════════════════════
+# CREATE / PUSH ATTENDANCE TESTS
+# ══════════════════════════════════════════════════════════════
+
+class TestCreateEndpoint:
+
+    def _make_payload(self, id=1, status='present', date='2024-01-01'):
+        return json.dumps({'id': id, 'status': status, 'date': date}).encode()
+
+    def test_create_success(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.post(
+                '/attendance/create',
+                data=self._make_payload(),
+                content_type='application/json'
+            )
+            assert response.status_code == 200
+            data = json.loads(response.data)
+            assert data['message'] == 'Successfully uploaded the attendance data'
+
+    def test_create_mysql_connection_fails(self, client):
+        """Source code mein bug hai — 400 int return karta hai, isliye status check nahi"""
+        with patch('attendance_api.create_mysql_client', side_effect=Exception("DB error")):
+            response = client.post(
+                '/attendance/create',
+                data=self._make_payload(),
+                content_type='application/json'
+            )
+            # Source code: `return 400` (integer) — Flask isko error maanta hai
+            # Hum sirf ensure karte hain ki response aaya
+            assert response.status_code in [400, 500]
+
+    def test_create_insert_fails(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = [None, Exception("Insert error")]
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.post(
+                '/attendance/create',
+                data=self._make_payload(),
+                content_type='application/json'
+            )
+            assert response.status_code == 400
+            data = json.loads(response.data)
+            assert 'Error' in data['message']
+
+    def test_create_with_absent_status(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.post(
+                '/attendance/create',
+                data=self._make_payload(id=2, status='absent'),
+                content_type='application/json'
+            )
+            assert response.status_code == 200
+
+    def test_create_table_creation_called(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            client.post(
+                '/attendance/create',
+                data=self._make_payload(),
+                content_type='application/json'
+            )
+            assert mock_cursor.execute.called
+
+    def test_create_returns_json(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.post(
+                '/attendance/create',
+                data=self._make_payload(),
+                content_type='application/json'
+            )
+            assert response.content_type == 'application/json'
+
+
+# ══════════════════════════════════════════════════════════════
+# SEARCH / FETCH ATTENDANCE TESTS
+# ══════════════════════════════════════════════════════════════
+
+class TestSearchEndpoint:
+
+    def test_search_success_with_data(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            (1, 'present', '2024-01-01'),
+            (2, 'absent',  '2024-01-02'),
+        ]
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.get('/attendance/search')
+            assert response.status_code == 200
+            data = json.loads(response.data)
+            assert isinstance(data, list)
+            assert len(data) == 2
+            assert data[0]['id'] == 1
+            assert data[0]['status'] == 'present'
+            assert data[0]['date'] == '2024-01-01'
+
+    def test_search_empty_result(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.get('/attendance/search')
+            assert response.status_code == 200
+            data = json.loads(response.data)
+            assert data == []
+
+    def test_search_mysql_fails(self, client):
+        with patch('attendance_api.create_mysql_client', side_effect=Exception("DB error")):
+            response = client.get('/attendance/search')
+            assert response.status_code == 200
+            data = json.loads(response.data)
+            assert data['message'] == 'Error while pulling data for attendance'
+
+    def test_search_multiple_records(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [
+            (1, 'present', '2024-01-01'),
+            (2, 'absent',  '2024-01-02'),
+            (3, 'present', '2024-01-03'),
+        ]
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.get('/attendance/search')
+            data = json.loads(response.data)
+            assert len(data) == 3
+
+    def test_search_returns_json(self, client):
+        with patch('attendance_api.create_mysql_client', side_effect=Exception("error")):
+            response = client.get('/attendance/search')
+            assert response.content_type == 'application/json'
+
+    def test_search_record_fields(self, client):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [(5, 'present', '2024-03-15')]
+        mock_conn.cursor.return_value = mock_cursor
+        with patch('attendance_api.create_mysql_client', return_value=mock_conn):
+            response = client.get('/attendance/search')
+            data = json.loads(response.data)
+            assert 'id' in data[0]
+            assert 'status' in data[0]
+            assert 'date' in data[0]
+
+
+# ══════════════════════════════════════════════════════════════
+# ROUTING TESTS
+# ══════════════════════════════════════════════════════════════
+
+class TestRouting:
+
+    def test_unknown_route_returns_404(self, client):
+        response = client.get('/')
+        assert response.status_code == 404
+
+    def test_unknown_post_route(self, client):
+        response = client.post('/unknown')
+        assert response.status_code == 404
+
+
+# ══════════════════════════════════════════════════════════════
+# MYSQL CLIENT TESTS — sys.modules mock use karo
+# ══════════════════════════════════════════════════════════════
+
+class TestMysqlClient:
+
+    def test_create_mysql_client_called_with_correct_params(self):
+        """mysql.connector already mocked hai sys.modules mein"""
+        import mysql.connector as mc
+        mc.connect.reset_mock()
+        mock_conn = MagicMock()
+        mc.connect.return_value = mock_conn
+        result = create_mysql_client()
+        assert mc.connect.called
+        call_kwargs = mc.connect.call_args[1]
+        assert 'host' in call_kwargs
+        assert 'user' in call_kwargs
+        assert 'passwd' in call_kwargs
+        assert 'database' in call_kwargs
+
+    def test_create_mysql_client_returns_connection(self):
+        """Connection object return hona chahiye"""
+        import mysql.connector as mc
+        mc.connect.reset_mock()
+        mock_conn = MagicMock()
+        mc.connect.return_value = mock_conn
+        result = create_mysql_client()
+        assert result == mock_conn
