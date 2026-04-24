@@ -3,7 +3,7 @@
 import org.example.DeploymentManager
 import org.example.NotificationManager
 import org.example.TestManager
-import org.example.SonarQubeManager        // ← NEW: SonarQube import
+
 
 pipeline {
     agent any
