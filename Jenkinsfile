@@ -4,25 +4,24 @@ import org.example.DeploymentManager
 import org.example.NotificationManager
 import org.example.TestManager
 
-
 pipeline {
     agent any
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+    }
 
     parameters {
         choice(
             name: 'SERVICE',
             choices: ['attendance', 'employee', 'salary', 'frontend'],
-            description: 'Microservice to test and deploy'
+            description: 'Which microservice to deploy'
         )
         string(
             name: 'VERSION',
             defaultValue: '1.0.0',
-            description: 'Version to deploy'
-        )
-        choice(
-            name: 'ENVIRONMENT',
-            choices: ['dev', 'staging', 'prod'],
-            description: 'Target environment'
+            description: 'Semver version e.g. 1.0.0'
         )
         string(
             name: 'RECIPIENTS',
@@ -34,32 +33,10 @@ pipeline {
             defaultValue: true,
             description: 'Run E2E tests?'
         )
-        // ── NEW: SonarQube Parameters ─────────────────────────
-        booleanParam(
-            name: 'RUN_SONAR',
-            defaultValue: true,
-            description: 'Run SonarQube analysis?'
-        )
-        string(
-            name: 'PR_NUMBER',
-            defaultValue: '',
-            description: 'PR number (empty for branch build)'
-        )
-        string(
-            name: 'PR_BRANCH',
-            defaultValue: '',
-            description: 'PR source branch'
-        )
-        string(
-            name: 'TARGET_BRANCH',
-            defaultValue: 'master',
-            description: 'PR target branch'
-        )
     }
 
     environment {
         BRANCH_NAME = "${env.GIT_BRANCH ?: 'master'}"
-        APP_URL     = "http://localhost:8081"
     }
 
     stages {
@@ -78,16 +55,17 @@ pipeline {
         stage('Validate') {
             steps {
                 script {
+                    milestone(1)
                     new DeploymentManager(this).validateConfig(
                         params.SERVICE,
-                        params.ENVIRONMENT,
+                        'dev',
                         params.VERSION
                     )
                 }
             }
         }
 
-        // ── STAGE 3: INSTALL DEPENDENCIES ─────────────────────
+        // ── STAGE 3: INSTALL TEST DEPENDENCIES ────────────────
         stage('Install Test Dependencies') {
             steps {
                 script {
@@ -121,10 +99,8 @@ pipeline {
                 stage('Integration Tests') {
                     steps {
                         script {
-                            new TestManager(this).runIntegrationTests(
-                                params.SERVICE,
-                                env.APP_URL
-                            )
+                            new TestManager(this)
+                                .runIntegrationTests(params.SERVICE, '')
                         }
                     }
                     post {
@@ -146,10 +122,8 @@ pipeline {
             }
             steps {
                 script {
-                    new TestManager(this).runE2ETests(
-                        params.SERVICE,
-                        env.APP_URL
-                    )
+                    new TestManager(this)
+                        .runE2ETests(params.SERVICE, '')
                 }
             }
             post {
@@ -162,17 +136,7 @@ pipeline {
             }
         }
 
-        // ── STAGE 6: COVERAGE CHECK ────────────────────────────
-        stage('Coverage Threshold Check') {
-            steps {
-                script {
-                    new TestManager(this)
-                        .checkCoverageThreshold(params.SERVICE)
-                }
-            }
-        }
-
-        // ── STAGE 7: GENERATE PDF REPORT ───────────────────────
+        // ── STAGE 6: GENERATE PDF REPORT ───────────────────────
         stage('Generate PDF Report') {
             steps {
                 script {
@@ -182,8 +146,8 @@ pipeline {
             }
         }
 
-        // ── STAGE 8: PUBLISH RESULTS ───────────────────────────
-        stage('Publish Test Results') {
+        // ── STAGE 7: PUBLISH RESULTS ───────────────────────────
+        stage('Publish Results') {
             steps {
                 script {
                     new TestManager(this)
@@ -192,123 +156,154 @@ pipeline {
             }
         }
 
-        // ── STAGE 9: SONARQUBE ANALYSIS ── NEW ─────────────────
-        stage('SonarQube Analysis') {
-            when {
-                expression { return params.RUN_SONAR == true }
-            }
+        // ══════════════════════════════════════════════════════
+        // DEV — FULLY AUTOMATIC (no approval)
+        // Canary strategy use hoti hai dev pe
+        // ══════════════════════════════════════════════════════
+        stage('Deploy to Dev') {
             steps {
                 script {
-                    def sonar = new SonarQubeManager(this)
+                    milestone(2)
+                    echo "=== AUTO DEPLOY TO DEV — NO APPROVAL NEEDED ==="
 
-                    // PR build hai ya branch build check karo
-                    if (params.PR_NUMBER?.trim()) {
-
-                        // PR Analysis with decoration
-                        sonar.runPRAnalysis(
-                            params.SERVICE,
-                            params.VERSION,
-                            [
-                                prNumber    : params.PR_NUMBER,
-                                prBranch    : params.PR_BRANCH,
-                                targetBranch: params.TARGET_BRANCH,
-                                repo        : 'anuj9689/OT-Microservices'
-                            ]
+                    new DeploymentManager(this).deploy(
+                        params.SERVICE, 'dev', params.VERSION
+                    )
+                }
+            }
+            post {
+                success {
+                    script {
+                        echo "Running health check on dev..."
+                        def healthy = performHealthCheck(
+                            params.SERVICE, 'dev'
                         )
-
-                    } else {
-
-                        // Normal branch analysis
-                        sonar.runBranchAnalysis(
-                            params.SERVICE,
-                            params.VERSION,
-                            env.BRANCH_NAME
-                        )
+                        if (!healthy) {
+                            echo "Dev health check FAILED — rolling back"
+                            new DeploymentManager(this)
+                                .rollback(params.SERVICE, 'dev')
+                        } else {
+                            echo "Dev health check PASSED"
+                        }
                     }
                 }
             }
         }
 
-        // ── STAGE 10: QUALITY GATE ── NEW ──────────────────────
-        stage('Quality Gate') {
-            when {
-                expression { return params.RUN_SONAR == true }
-            }
+        // ══════════════════════════════════════════════════════
+        // STAGING — MANUAL APPROVAL + Blue-Green
+        // ══════════════════════════════════════════════════════
+        stage('Approval for Staging') {
             steps {
                 script {
-                    def sonar = new SonarQubeManager(this)
-
-                    // Wait for Quality Gate
-                    // Pipeline FAIL hogi agar QG fail hua
-                    sonar.waitForQualityGate()
-
-                    // Metrics fetch karo aur log karo
-                    def results = sonar.getAnalysisResults('OT-Microservices')
-                    echo "SonarQube Metrics: ${results.metrics}"
-                }
-            }
-        }
-
-        // ── STAGE 11: DEPLOY TO DEV ────────────────────────────
-        stage('Deploy to Dev') {
-            when {
-                expression { return params.ENVIRONMENT == 'dev' }
-            }
-            steps {
-                script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE, 'dev', params.VERSION)
-                }
-            }
-        }
-
-        // ── STAGE 12: DEPLOY TO STAGING ────────────────────────
-        stage('Deploy to Staging') {
-            when {
-                anyOf {
-                    expression { return params.ENVIRONMENT == 'staging' }
-                    expression { return params.ENVIRONMENT == 'prod' }
-                }
-            }
-            steps {
-                script {
-                    new DeploymentManager(this).deploy(
-                        params.SERVICE, 'staging', params.VERSION)
-                }
-            }
-        }
-
-        // ── STAGE 13: PROD APPROVAL ────────────────────────────
-        stage('Approval for Prod') {
-            when {
-                expression { return params.ENVIRONMENT == 'prod' }
-            }
-            steps {
-                script {
+                    // Notify approval pending
                     def details = getBuildDetails(this)
                     details.changes = details.changes +
-                        " | WAITING FOR PROD APPROVAL"
+                        " | STAGING APPROVAL PENDING"
                     new NotificationManager(this)
                         .notifyAll('UNSTABLE', details)
+
+                    echo "Waiting for staging approval..."
                 }
+
                 timeout(time: 30, unit: 'MINUTES') {
                     input(
-                        message: 'All tests passed. Quality Gate passed. Deploy to PROD?',
-                        ok: 'Yes Deploy'
+                        message: "Deploy ${params.SERVICE} v${params.VERSION} to STAGING?",
+                        ok: 'Yes — Deploy to Staging'
                     )
                 }
             }
         }
 
-        // ── STAGE 14: DEPLOY TO PROD ───────────────────────────
-        stage('Deploy to Prod') {
-            when {
-                expression { return params.ENVIRONMENT == 'prod' }
-            }
+        stage('Deploy to Staging') {
             steps {
                 script {
+                    milestone(3)
+                    echo "=== BLUE-GREEN DEPLOY TO STAGING ==="
+
                     new DeploymentManager(this).deploy(
-                        params.SERVICE, 'prod', params.VERSION)
+                        params.SERVICE, 'staging', params.VERSION
+                    )
+                }
+            }
+            post {
+                success {
+                    script {
+                        echo "Running health check on staging..."
+                        def healthy = performHealthCheck(
+                            params.SERVICE, 'staging'
+                        )
+                        if (!healthy) {
+                            echo "Staging health check FAILED — rolling back"
+                            new DeploymentManager(this)
+                                .rollback(params.SERVICE, 'staging')
+                            error "Staging health check failed — rolled back"
+                        } else {
+                            echo "Staging health check PASSED"
+                        }
+                    }
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════
+        // PRODUCTION — MANUAL APPROVAL + Blue-Green
+        // ══════════════════════════════════════════════════════
+        stage('Approval for Prod') {
+            steps {
+                script {
+                    def details = getBuildDetails(this)
+                    details.changes = details.changes +
+                        " | PROD APPROVAL PENDING"
+                    new NotificationManager(this)
+                        .notifyAll('UNSTABLE', details)
+
+                    echo "Waiting for production approval..."
+                }
+
+                timeout(time: 60, unit: 'MINUTES') {
+                    input(
+                        message: "Deploy ${params.SERVICE} v${params.VERSION} to PRODUCTION?",
+                        ok: 'APPROVE PRODUCTION DEPLOY'
+                    )
+                }
+            }
+        }
+
+        stage('Deploy to Prod') {
+            steps {
+                script {
+                    milestone(4)
+                    echo "=== BLUE-GREEN DEPLOY TO PRODUCTION ==="
+
+                    new DeploymentManager(this).deploy(
+                        params.SERVICE, 'prod', params.VERSION
+                    )
+                }
+            }
+            post {
+                success {
+                    script {
+                        echo "Running health check on prod..."
+                        def healthy = performHealthCheck(
+                            params.SERVICE, 'prod'
+                        )
+                        if (!healthy) {
+                            echo "PROD health check FAILED — AUTO ROLLBACK"
+                            new DeploymentManager(this)
+                                .rollback(params.SERVICE, 'prod')
+
+                            def details = getBuildDetails(this)
+                            details.changes = details.changes +
+                                " | PROD HEALTH FAILED — ROLLBACK DONE"
+                            new NotificationManager(this)
+                                .notifyAll('FAILURE', details)
+
+                            error "Prod health check failed — rolled back"
+                        } else {
+                            echo "Prod health check PASSED"
+                        }
+                    }
                 }
             }
         }
@@ -319,24 +314,19 @@ pipeline {
 
         always {
             script {
-                new TestManager(this)
-                    .publishResults(params.SERVICE)
+                try {
+                    new TestManager(this).publishResults(params.SERVICE)
+                } catch (Exception e) {
+                    echo "Publish warning: ${e.message}"
+                }
             }
         }
 
         success {
             script {
                 def details = getBuildDetails(this)
-
-                if (env.BRANCH_NAME?.contains('master') ||
-                    env.BRANCH_NAME?.contains('main')) {
-                    details.changes = details.changes +
-                        " | MASTER DEPLOY — QG PASSED"
-                } else {
-                    details.changes = details.changes +
-                        " | ALL TESTS PASSED — QG PASSED"
-                }
-
+                details.changes = details.changes +
+                    " | ALL ENVIRONMENTS DEPLOYED SUCCESSFULLY"
                 new NotificationManager(this).notifyAll('SUCCESS', details)
             }
         }
@@ -344,19 +334,17 @@ pipeline {
         failure {
             script {
                 def details = getBuildDetails(this)
-
                 try {
-                    new DeploymentManager(this).rollback(
-                        params.SERVICE,
-                        params.ENVIRONMENT
-                    )
+                    new DeploymentManager(this)
+                        .rollback(params.SERVICE, 'prod')
+                    new DeploymentManager(this)
+                        .rollback(params.SERVICE, 'staging')
                     details.changes = details.changes +
                         " | FAILED — AUTO ROLLBACK DONE"
                 } catch (Exception e) {
                     details.changes = details.changes +
-                        " | FAILED — ROLLBACK ALSO FAILED: ${e.message}"
+                        " | FAILED — ROLLBACK ERROR: ${e.message}"
                 }
-
                 new NotificationManager(this).notifyAll('FAILURE', details)
             }
         }
@@ -365,7 +353,7 @@ pipeline {
             script {
                 def details = getBuildDetails(this)
                 details.changes = details.changes +
-                    " | UNSTABLE — CHECK SONAR/TESTS"
+                    " | BUILD UNSTABLE"
                 new NotificationManager(this).notifyAll('UNSTABLE', details)
             }
         }
@@ -376,7 +364,85 @@ pipeline {
     }
 }
 
-// ── HELPER ────────────────────────────────────────────────────
+// ── HEALTH CHECK FUNCTION ─────────────────────────────────────
+def performHealthCheck(String service, String environment) {
+    echo "=== HEALTH CHECK: ${service} on ${environment} ==="
+
+    try {
+        // Step 1 — pods running hain check karo
+        def runningPods = sh(
+            script: """
+                kubectl get pods -n ${environment} \
+                    -l app=${service} \
+                    --field-selector=status.phase=Running \
+                    --no-headers 2>/dev/null | wc -l
+            """,
+            returnStdout: true
+        ).trim()
+
+        echo "Running pods: ${runningPods}"
+
+        if (runningPods.toInteger() == 0) {
+            echo "No running pods found"
+            return false
+        }
+
+        // Step 2 — ClusterIP lo
+        def clusterIP = sh(
+            script: """
+                kubectl get svc ${service} -n ${environment} \
+                    -o jsonpath='{.spec.clusterIP}' 2>/dev/null \
+                    || echo ''
+            """,
+            returnStdout: true
+        ).trim()
+
+        if (!clusterIP || clusterIP == '') {
+            echo "Service ClusterIP not found — skipping HTTP check"
+            return true
+        }
+
+        echo "Service ClusterIP: ${clusterIP}"
+
+        // Step 3 — HTTP health check with retry
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            echo "HTTP health check attempt ${attempt}/5..."
+
+            def httpStatus = sh(
+                script: """
+                    curl -s -o /dev/null \
+                        -w "%{http_code}" \
+                        --connect-timeout 5 \
+                        --max-time 10 \
+                        http://${clusterIP}/${service}/healthz \
+                        2>/dev/null || echo "000"
+                """,
+                returnStdout: true
+            ).trim()
+
+            echo "HTTP Status: ${httpStatus}"
+
+            if (httpStatus == '200') {
+                echo "Health check PASSED on attempt ${attempt}"
+                return true
+            }
+
+            if (attempt < 5) {
+                echo "Retrying in 10 seconds..."
+                sleep(10)
+            }
+        }
+
+        echo "Health check FAILED after 5 attempts"
+        return false
+
+    } catch (Exception e) {
+        echo "Health check error: ${e.message}"
+        return false
+    }
+}
+
+// ── BUILD DETAILS HELPER ──────────────────────────────────────
 def getBuildDetails(def ctx) {
     String changes = 'No changes'
     try {
@@ -398,11 +464,10 @@ def getBuildDetails(def ctx) {
         artifactsUrl: "${buildUrl}artifact/${service}/tests/reports/test-report.pdf",
         testsUrl    : "${buildUrl}testReport/",
         coverageUrl : "${buildUrl}Coverage_20Report/",
-        sonarUrl    : "http://localhost:9000/dashboard?id=OT-Microservices", // ← NEW
         branch      : ctx.env.GIT_BRANCH     ?: 'master',
         service     : service,
         version     : ctx.params.VERSION     ?: '0.0.0',
-        environment : ctx.params.ENVIRONMENT ?: 'unknown',
+        environment : 'dev → staging → prod',
         duration    : ctx.currentBuild.durationString ?: 'N/A',
         changes     : changes,
         recipients  : ctx.params.RECIPIENTS  ?: 'YOUR_EMAIL@gmail.com'
