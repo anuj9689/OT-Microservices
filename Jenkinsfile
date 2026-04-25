@@ -196,7 +196,6 @@ pipeline {
         stage('Approval for Staging') {
             steps {
                 script {
-                    // Notify approval pending
                     def details = getBuildDetails(this)
                     details.changes = details.changes +
                         " | STAGING APPROVAL PENDING"
@@ -365,11 +364,14 @@ pipeline {
 }
 
 // ── HEALTH CHECK FUNCTION ─────────────────────────────────────
+// FIX: ClusterIP is not reachable from Jenkins (outside the cluster).
+// We now use `kubectl exec` to run curl INSIDE a pod — same approach
+// your staging smoke test uses, which already returns HTTP 200.
 def performHealthCheck(String service, String environment) {
     echo "=== HEALTH CHECK: ${service} on ${environment} ==="
 
     try {
-        // Step 1 — pods running hain check karo
+        // Step 1 — Check running pods exist
         def runningPods = sh(
             script: """
                 kubectl get pods -n ${environment} \
@@ -387,34 +389,42 @@ def performHealthCheck(String service, String environment) {
             return false
         }
 
-        // Step 2 — ClusterIP lo
-        def clusterIP = sh(
+        // Step 2 — Get a running pod name to exec into
+        def podName = sh(
             script: """
-                kubectl get svc ${service} -n ${environment} \
-                    -o jsonpath='{.spec.clusterIP}' 2>/dev/null \
+                kubectl get pods -n ${environment} \
+                    -l app=${service} \
+                    --field-selector=status.phase=Running \
+                    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null \
                     || echo ''
             """,
             returnStdout: true
         ).trim()
 
-        if (!clusterIP || clusterIP == '') {
-            echo "Service ClusterIP not found — skipping HTTP check"
+        if (!podName || podName == '') {
+            echo "Could not get pod name — skipping HTTP check"
             return true
         }
 
-        echo "Service ClusterIP: ${clusterIP}"
+        echo "Using pod: ${podName}"
 
-        // Step 3 — HTTP health check with retry
+        // Step 3 — Detect container port (default 8081 for attendance/employee/salary, 80 for frontend)
+        def port = (service == 'frontend') ? '80' : '8081'
+
+        // Step 4 — HTTP health check via kubectl exec (runs curl INSIDE the pod)
+        // This avoids the ClusterIP routing issue — Jenkins cannot reach ClusterIPs
+        // directly, but curl running inside the pod can hit localhost just fine.
         for (int attempt = 1; attempt <= 5; attempt++) {
-            echo "HTTP health check attempt ${attempt}/5..."
+            echo "Health check attempt ${attempt}/5 (kubectl exec into ${podName})..."
 
             def httpStatus = sh(
                 script: """
-                    curl -s -o /dev/null \
-                        -w "%{http_code}" \
-                        --connect-timeout 5 \
-                        --max-time 10 \
-                        http://${clusterIP}/${service}/healthz \
+                    kubectl exec -n ${environment} ${podName} -- \
+                        curl -s -o /dev/null \
+                             -w "%{http_code}" \
+                             --connect-timeout 5 \
+                             --max-time 10 \
+                             http://localhost:${port}/${service}/healthz \
                         2>/dev/null || echo "000"
                 """,
                 returnStdout: true
